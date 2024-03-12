@@ -323,7 +323,7 @@ def load_model(args, model_without_ddp, optimizer, lr_scheduler, loss_scaler):
             print('- Load lr scheduler from the checkpoint: ', args.resume)
             lr_scheduler.load_state_dict(checkpoint.pop("lr_scheduler"))
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, loss_scaler, acc1=None):
+def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, loss_scaler, acc1=None, mae_task=False):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     if loss_scaler is not None:
@@ -340,6 +340,9 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, l
                 'scaler': loss_scaler.state_dict(),
                 'args': args,
             }
+            if mae_task:
+                to_save['encoder'] = model_without_ddp.mae_encoder.state_dict()
+
             torch.save(to_save, checkpoint_path)
     else:
         client_state = {'epoch': epoch}

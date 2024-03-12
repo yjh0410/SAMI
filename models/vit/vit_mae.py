@@ -3,51 +3,58 @@ import torch
 import torch.nn as nn
 
 try:
-    from vit_modules import ViTBlock
+    from .common import ViTBlock, PatchEmbed
 except:
-    from .vit_modules import ViTBlock
+    from  common import ViTBlock, PatchEmbed
 
 
 # ------------------------ Basic Modules ------------------------
-## Masked Image Modeling (MIM) ViT Encoder
-class MAE_ViT_Encoder(nn.Module):
+class MaeEncoder(nn.Module):
     def __init__(self,
-                 img_size      :int   = 224,
-                 patch_size    :int   = 16,
-                 img_dim       :int   = 3,
-                 en_emb_dim    :int   = 768,
-                 en_num_layers :int   = 12,
-                 en_num_heads  :int   = 12,
-                 qkv_bias      :bool  = True,
-                 mlp_ratio     :float = 4.0,
-                 dropout       :float = 0.1,
-                 mask_ratio    :float = 0.75):
+                 img_size: int,
+                 patch_size: int,
+                 in_chans: int,
+                 patch_embed_dim: int,
+                 depth: int,
+                 num_heads: int,
+                 mlp_ratio: float,
+                 act_layer: nn.GELU,
+                 mask_ratio: float = 0.75,
+                 dropout: float = 0.0,
+                 ) -> None:
+        """
+        Args:
+            img_size (int): Input image size.
+            patch_size (int): Patch size.
+            in_chans (int): Number of input image channels.
+            patch_embed_dim (int): Patch embedding dimension.
+            depth (int): Depth of ViT.
+            num_heads (int): Number of attention heads in each ViT block.
+            mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+            act_layer (nn.Module): Activation layer.
+        """
         super().__init__()
-        # -------- basic parameters --------
+        # ----------- Basic parameters -----------
         self.img_size = img_size
-        self.img_dim = img_dim
-        self.en_emb_dim = en_emb_dim
-        self.en_num_layers = en_num_layers
-        self.en_num_heads = en_num_heads
+        self.patch_size = patch_size
+        self.image_embedding_size = img_size // ((patch_size if patch_size > 0 else 1))
+        self.patch_embed_dim = patch_embed_dim
+        self.num_heads = num_heads
         self.num_patches = (img_size // patch_size) ** 2
         self.mask_ratio = mask_ratio
-        # -------- network parameters --------
-        ## vit encoder
-        self.patch_embed = nn.Conv2d(img_dim, en_emb_dim, kernel_size=patch_size, stride=patch_size)
-        self.transformer = nn.ModuleList([ViTBlock(en_emb_dim, qkv_bias, en_num_heads, mlp_ratio, dropout) for _ in range(en_num_layers)])
-        self.norm        = nn.LayerNorm(en_emb_dim)
-        self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches + 1, en_emb_dim), requires_grad=False)
-        self.cls_token   = nn.Parameter(torch.zeros(1, 1, en_emb_dim))
-
+        # ----------- Model parameters -----------
+        self.patch_embed = PatchEmbed(in_chans, patch_embed_dim, patch_size, 0, patch_size)
+        self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim), requires_grad=False)
+        self.norm_layer  = nn.LayerNorm(patch_embed_dim)
+        self.blocks      = nn.ModuleList([
+            ViTBlock(patch_embed_dim, num_heads, mlp_ratio, True, act_layer=act_layer, dropout=dropout)
+            for _ in range(depth)])
         self._init_weights()
 
     def _init_weights(self):
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = self.get_posembed(self.pos_embed.shape[-1], int(self.num_patches**.5), cls_token=True)
+        pos_embed = self.get_posembed(self.pos_embed.shape[-1], int(self.num_patches**.5))
         self.pos_embed.data.copy_(pos_embed)
-
-        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        torch.nn.init.normal_(self.cls_token, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm
         for m in self.modules():           
@@ -60,7 +67,7 @@ class MAE_ViT_Encoder(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
 
-    def get_posembed(self, embed_dim, grid_size, cls_token=False, temperature=10000):
+    def get_posembed(self, embed_dim, grid_size, temperature=10000):
         scale = 2 * math.pi
         grid_h, grid_w = grid_size, grid_size
         num_pos_feats = embed_dim // 2
@@ -82,9 +89,6 @@ class MAE_ViT_Encoder(nn.Module):
 
         # [H, W, C] -> [N, C]
         pos_embed = torch.cat((pos_y, pos_x), dim=-1).view(-1, embed_dim)
-        if cls_token:
-            # [1+N, C]
-            pos_embed = torch.cat([torch.zeros([1, embed_dim]), pos_embed], dim=0)
 
         return pos_embed.unsqueeze(0)
 
@@ -111,36 +115,31 @@ class MAE_ViT_Encoder(nn.Module):
 
         return x_masked, mask, ids_restore
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # patch embed
         x = self.patch_embed(x)
+        # [B, C, H, W] -> [B, C, N] -> [B, N, C], N = H x W
         x = x.flatten(2).permute(0, 2, 1).contiguous()
 
-        # add pos embed w/o cls token
-        x = x + self.pos_embed[:, 1:, :]
+        # add pos embed
+        x = x + self.pos_embed
 
         # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.random_masking(x)
 
-        # append cls token
-        cls_token = self.cls_token + self.pos_embed[:, :1, :]
-        cls_tokens = cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-
         # apply Transformer blocks
-        for block in self.transformer:
+        for block in self.blocks:
             x = block(x)
-        x = self.norm(x)
-
+        x = self.norm_layer(x)
+        
         return x, mask, ids_restore
 
-## Masked ViT Decoder
-class MAE_ViT_Decoder(nn.Module):
+class MaeDecoder(nn.Module):
     def __init__(self,
                  img_size      :int   = 16,
                  patch_size    :int   = 16,
-                 img_dim       :int   = 3,
                  en_emb_dim    :int   = 784,
+                 out_dim       :int   = 1024,
                  de_emb_dim    :int   = 512,
                  de_num_layers :int   = 12,
                  de_num_heads  :int   = 12,
@@ -150,7 +149,7 @@ class MAE_ViT_Decoder(nn.Module):
                  norm_pix_loss :bool = False):
         super().__init__()
         # -------- basic parameters --------
-        self.img_dim = img_dim
+        self.out_dim = out_dim
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = (img_size // patch_size) ** 2
@@ -162,16 +161,18 @@ class MAE_ViT_Decoder(nn.Module):
         # -------- network parameters --------
         self.mask_token        = nn.Parameter(torch.zeros(1, 1, de_emb_dim))
         self.decoder_embed     = nn.Linear(en_emb_dim, de_emb_dim)
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, de_emb_dim), requires_grad=False)  # fixed sin-cos embedding
-        self.transformer       = nn.ModuleList([ViTBlock(de_emb_dim, qkv_bias, de_num_heads, mlp_ratio, dropout) for _ in range(de_num_layers)])
+        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, de_emb_dim), requires_grad=False)  # fixed sin-cos embedding
         self.decoder_norm      = nn.LayerNorm(de_emb_dim)
-        self.decoder_pred      = nn.Linear(de_emb_dim, patch_size**2 * img_dim, bias=True)
+        self.decoder_pred      = nn.Linear(de_emb_dim, out_dim, bias=True)
+        self.blocks            = nn.ModuleList([
+            ViTBlock(de_emb_dim, de_num_heads, mlp_ratio, qkv_bias, dropout=dropout)
+            for _ in range(de_num_layers)])
         
         self._init_weights()
 
     def _init_weights(self):
         # initialize (and freeze) pos_embed by sin-cos embedding
-        decoder_pos_embed = self.get_posembed(self.decoder_pos_embed.shape[-1], int(self.num_patches**.5), cls_token=True)
+        decoder_pos_embed = self.get_posembed(self.decoder_pos_embed.shape[-1], int(self.num_patches**.5))
         self.decoder_pos_embed.data.copy_(decoder_pos_embed)
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
@@ -188,7 +189,7 @@ class MAE_ViT_Decoder(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
 
-    def get_posembed(self, embed_dim, grid_size, cls_token=False, temperature=10000):
+    def get_posembed(self, embed_dim, grid_size, temperature=10000):
         scale = 2 * math.pi
         grid_h, grid_w = grid_size, grid_size
         num_pos_feats = embed_dim // 2
@@ -210,9 +211,6 @@ class MAE_ViT_Decoder(nn.Module):
 
         # [H, W, C] -> [N, C]
         pos_embed = torch.cat((pos_y, pos_x), dim=-1).view(-1, embed_dim)
-        if cls_token:
-            # [1+N, C]
-            pos_embed = torch.cat([torch.zeros([1, embed_dim]), pos_embed], dim=0)
 
         return pos_embed.unsqueeze(0)
 
@@ -222,121 +220,48 @@ class MAE_ViT_Decoder(nn.Module):
         B, N_nomask = x.shape[:2]
 
         # append mask tokens to sequence
-        mask_tokens = self.mask_token.repeat(B, ids_restore.shape[1] - (N_nomask - 1), 1)       # [B, N_mask, C], N_mask = (N-1) - N_nomask
-        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)                                       # no cls token
-        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
-        x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
+        mask_tokens = self.mask_token.repeat(B, ids_restore.shape[1] - (N_nomask - 1), 1)     # [B, N_mask, C], N_mask = (N-1) - N_nomask
+        x = torch.cat([x, mask_tokens], dim=1)
+        x = torch.gather(x, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
 
         # add pos embed w/ cls token
         x = x + self.decoder_pos_embed
 
         # apply Transformer blocks
-        for block in self.transformer:
+        for block in self.blocks:
             x = block(x)
         x = self.decoder_norm(x)
 
         # predict pixels
         x = self.decoder_pred(x)
 
-        # remove cls token
-        x = x[:, 1:, :]
-
         return x
 
 
 # ------------------------ MAE Vision Transformer ------------------------
-## Masked ViT
-class MAE_VisionTransformer(nn.Module):
+class ViTforMaskedAutoEncoder(nn.Module):
     def __init__(self,
-                 img_size      :int   = 16,
-                 patch_size    :int   = 16,
-                 img_dim       :int   = 3,
-                 en_emb_dim    :int   = 784,
-                 de_emb_dim    :int   = 512,
-                 en_num_layers :int   = 12,
-                 de_num_layers :int   = 12,
-                 en_num_heads  :int   = 12,
-                 de_num_heads  :int   = 16,
-                 qkv_bias      :bool  = True,
-                 mlp_ratio     :float = 4.0,
-                 dropout       :float = 0.1,
-                 mask_ratio    :float = 0.75,
-                 is_train      :bool  = False,
+                 encoder :MaeEncoder,
+                 decoder :MaeDecoder,
                  norm_pix_loss :bool = False):
         super().__init__()
-        # -------- basic parameters --------
-        self.img_dim = img_dim
-        self.is_train = is_train
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_patches = (img_size // patch_size) ** 2
-        ## encoder
-        self.en_emb_dim = en_emb_dim
-        self.en_num_layers = en_num_layers
-        self.en_num_heads = en_num_heads
-        self.mask_ratio = mask_ratio
-        ## decoder
-        self.de_emb_dim = de_emb_dim
-        self.de_num_layers = de_num_layers
-        self.de_num_heads = de_num_heads
+        self.mae_encoder = encoder
+        self.mae_decoder = decoder
         self.norm_pix_loss = norm_pix_loss
-        # -------- network parameters --------
-        self.mae_encoder = MAE_ViT_Encoder(
-            img_size, patch_size, img_dim, en_emb_dim, en_num_layers, en_num_heads, qkv_bias, mlp_ratio, dropout, mask_ratio)
-        self.mae_decoder = MAE_ViT_Decoder(
-            img_size, patch_size, img_dim, en_emb_dim, de_emb_dim, de_num_layers, de_num_heads, qkv_bias, mlp_ratio, dropout, norm_pix_loss)
 
-    def patchify(self, imgs, patch_size):
+    def compute_loss(self, output, target):
         """
-        imgs: (B, 3, H, W)
-        x: (N, L, patch_size**2 *3)
-        """
-        p = patch_size
-        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
-
-        h = w = imgs.shape[2] // p
-        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
-        x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
-
-        return x
-
-    def unpatchify(self, x, patch_size):
-        """
-        x: (B, N, patch_size**2 *3)
-        imgs: (B, 3, H, W)
-        """
-        p = patch_size
-        h = w = int(x.shape[1]**.5)
-        assert h * w == x.shape[1]
-        
-        x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
-        x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
-
-        return imgs
-
-    def compute_loss(self, x, output):
-        """
-        imgs: [B, 3, H, W]
-        pred: [B, N, C], C = p*p*3
+        pred: [B, N, C_ot]
         mask: [B, N], 0 is keep, 1 is remove, 
         """
-        target = self.patchify(x, self.patch_size)
-        if self.norm_pix_loss:
-            mean = target.mean(dim=-1, keepdim=True)
-            var = target.var(dim=-1, keepdim=True)
-            target = (target - mean) / (var + 1.e-6)**.5
-
-        pred, mask = output["x_pred"], output["mask"]
+        pred = output["x_pred"]
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        loss = loss.mean()
         
         return loss
 
-    def forward(self, x):
-        imgs = x
+    def forward(self, x, target=None):
         x, mask, ids_restore = self.mae_encoder(x)
         x = self.mae_decoder(x, ids_restore)
         output = {
@@ -344,129 +269,112 @@ class MAE_VisionTransformer(nn.Module):
             'mask': mask
         }
 
-        if self.is_train:
-            loss = self.compute_loss(imgs, output)
+        if self.training:
+            assert target is not None
+            loss = self.compute_loss(output, target)
             output["loss"] = loss
 
         return output
 
 
 # ------------------------ Model Functions ------------------------
-def mae_vit_nano(img_size=224, patch_size=16, img_dim=3, mask_ratio=0.75, is_train=False, norm_pix_loss=False):
-    model = MAE_VisionTransformer(img_size      = img_size,
-                                  patch_size    = patch_size,
-                                  img_dim       = img_dim,
-                                  en_emb_dim    = 192,
-                                  de_emb_dim    = 512,
-                                  en_num_layers = 12,
-                                  de_num_layers = 8,
-                                  en_num_heads  = 12,
-                                  de_num_heads  = 16,
-                                  qkv_bias      = True,
-                                  mlp_ratio     = 4.0,
-                                  dropout       = 0.1,
-                                  mask_ratio    = mask_ratio,
-                                  is_train      = is_train,
-                                  norm_pix_loss = norm_pix_loss)
-
-    return model
-
-def mae_vit_tiny(img_size=224, patch_size=16, img_dim=3, mask_ratio=0.75, is_train=False, norm_pix_loss=False):
-    model = MAE_VisionTransformer(img_size      = img_size,
-                                  patch_size    = patch_size,
-                                  img_dim       = img_dim,
-                                  en_emb_dim    = 384,
-                                  de_emb_dim    = 512,
-                                  en_num_layers = 12,
-                                  de_num_layers = 8,
-                                  en_num_heads  = 12,
-                                  de_num_heads  = 16,
-                                  qkv_bias      = True,
-                                  mlp_ratio     = 4.0,
-                                  dropout       = 0.1,
-                                  mask_ratio    = mask_ratio,
-                                  is_train      = is_train,
-                                  norm_pix_loss = norm_pix_loss)
-
-    return model
-
-def mae_vit_base(img_size=224, patch_size=16, img_dim=3, mask_ratio=0.75, is_train=False, norm_pix_loss=False):
-    model = MAE_VisionTransformer(img_size      = img_size,
-                                  patch_size    = patch_size,
-                                  img_dim       = img_dim,
-                                  en_emb_dim    = 768,
-                                  de_emb_dim    = 512,
-                                  en_num_layers = 12,
-                                  de_num_layers = 8,
-                                  en_num_heads  = 12,
-                                  de_num_heads  = 16,
-                                  qkv_bias      = True,
-                                  mlp_ratio     = 4.0,
-                                  dropout       = 0.1,
-                                  mask_ratio    = mask_ratio,
-                                  is_train      = is_train,
-                                  norm_pix_loss = norm_pix_loss)
-
-    return model
-
-def mae_vit_large(img_size=224, patch_size=16, img_dim=3, mask_ratio=0.75, is_train=False, norm_pix_loss=False):
-    model = MAE_VisionTransformer(img_size      = img_size,
-                                  patch_size    = patch_size,
-                                  img_dim       = img_dim,
-                                  en_emb_dim    = 1024,
-                                  de_emb_dim    = 512,
-                                  en_num_layers = 24,
-                                  de_num_layers = 8,
-                                  en_num_heads  = 16,
-                                  de_num_heads  = 16,
-                                  qkv_bias      = True,
-                                  mlp_ratio     = 4.0,
-                                  dropout       = 0.1,
-                                  mask_ratio    = mask_ratio,
-                                  is_train      = is_train,
-                                  norm_pix_loss = norm_pix_loss)
-
-    return model
-
-def mae_vit_huge(img_size=224, patch_size=16, img_dim=3, mask_ratio=0.75, is_train=False, norm_pix_loss=False):
-    model = MAE_VisionTransformer(img_size      = img_size,
-                                  patch_size    = patch_size,
-                                  img_dim       = img_dim,
-                                  en_emb_dim    = 1280,
-                                  de_emb_dim    = 512,
-                                  en_num_layers = 32,
-                                  de_num_layers = 8,
-                                  en_num_heads  = 16,
-                                  de_num_heads  = 16,
-                                  qkv_bias      = True,
-                                  mlp_ratio     = 4.0,
-                                  dropout       = 0.1,
-                                  mask_ratio    = mask_ratio,
-                                  is_train      = is_train,
-                                  norm_pix_loss = norm_pix_loss)
-
-    return model
+def build_vit_mae(model_name="vit_t", img_size=224, patch_size=16, img_dim=3, out_dim=256, mask_ratio=0.75, norm_pix_loss=False):
+    # ---------------- MAE Encoder ----------------
+    if model_name == "vit_t":
+        encoder = MaeEncoder(img_size=img_size,
+                             patch_size=patch_size,
+                             in_chans=img_dim,
+                             patch_embed_dim=192,
+                             depth=12,
+                             num_heads=3,
+                             mlp_ratio=4.0,
+                             act_layer=nn.GELU,
+                             mask_ratio=mask_ratio,
+                             dropout = 0.1)
+    if model_name == "vit_s":
+        encoder = MaeEncoder(img_size=img_size,
+                             patch_size=patch_size,
+                             in_chans=img_dim,
+                             patch_embed_dim=384,
+                             depth=12,
+                             num_heads=6,
+                             mlp_ratio=4.0,
+                             act_layer=nn.GELU,
+                             mask_ratio=mask_ratio,
+                             dropout = 0.1)
+    if model_name == "vit_b":
+        encoder = MaeEncoder(img_size=img_size,
+                             patch_size=patch_size,
+                             in_chans=img_dim,
+                             patch_embed_dim=768,
+                             depth=12,
+                             num_heads=12,
+                             mlp_ratio=4.0,
+                             act_layer=nn.GELU,
+                             mask_ratio=mask_ratio,
+                             dropout = 0.1)
+    if model_name == "vit_l":
+        encoder = MaeEncoder(img_size=img_size,
+                             patch_size=patch_size,
+                             in_chans=img_dim,
+                             patch_embed_dim=1024,
+                             depth=24,
+                             num_heads=16,
+                             mlp_ratio=4.0,
+                             act_layer=nn.GELU,
+                             mask_ratio=mask_ratio,
+                             dropout = 0.1)
+    if model_name == "vit_h":
+        encoder = MaeEncoder(img_size=img_size,
+                             patch_size=patch_size,
+                             in_chans=img_dim,
+                             patch_embed_dim=1280,
+                             depth=32,
+                             num_heads=16,
+                             mlp_ratio=4.0,
+                             act_layer=nn.GELU,
+                             mask_ratio=mask_ratio,
+                             dropout = 0.1)
+    
+    # ---------------- MAE Decoder ----------------
+    decoder = MaeDecoder(img_size=img_size,
+                         patch_size=patch_size,
+                         en_emb_dim=encoder.patch_embed_dim,
+                         out_dim=out_dim,
+                         de_emb_dim=512,
+                         de_num_layers=8,
+                         de_num_heads=16,
+                         qkv_bias=True,
+                         mlp_ratio=4.0,
+                         dropout=0.1,)
+    
+    return ViTforMaskedAutoEncoder(encoder, decoder, norm_pix_loss)
 
 
 if __name__ == '__main__':
     import torch
     from thop import profile
 
-    # build model
+    # Prepare an image as the input
     bs, c, h, w = 2, 3, 224, 224
-    is_train = True
     x = torch.randn(bs, c, h, w)
-    model = mae_vit_tiny(patch_size=16, is_train=is_train)
+    # Prepare an feature map as the target
+    patch_size = 16
+    out_dim = 1024
+    target = torch.randn(bs, h//patch_size*w//patch_size, out_dim)
 
-    # inference
-    outputs = model(x)
+    # Build model
+    model = build_vit_mae(patch_size=patch_size, out_dim=out_dim)
+
+    # Inference
+    outputs = model(x, target)
     if "loss" in outputs:
         print("Loss: ", outputs["loss"].item())
 
-    # compute FLOPs & Params
+    # Compute FLOPs & Params
     print('==============================')
+    model.eval()
     flops, params = profile(model, inputs=(x, ), verbose=False)
     print('GFLOPs : {:.2f}'.format(flops / 1e9 * 2))
     print('Params : {:.2f} M'.format(params / 1e6))
 
-    

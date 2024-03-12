@@ -45,8 +45,6 @@ def parse_args():
                         help='3 for RGB; 1 for Gray.')    
     parser.add_argument('--patch_size', type=int, default=16,
                         help='patch_size.')    
-    parser.add_argument('--color_format', type=str, default='rgb',
-                        help='color format: rgb or bgr')    
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='use cuda')
     parser.add_argument('--batch_size', type=int, default=256,
@@ -233,7 +231,7 @@ def main():
 
 
     # ------------------------- Build Model -------------------------
-    model = build_model(args)
+    model = build_model(args, model_type='cls')
     model.train().to(device)
     print(model)
     if local_rank <= 0:
@@ -256,7 +254,7 @@ def main():
 
     # ------------------------- Build Optimzier -------------------------
     args.base_lr = args.base_lr / 256 * args.batch_size * args.grad_accumulate    # auto scale lr
-    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, model_without_ddp.no_weight_decay(), args.layer_decay)
+    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, model_without_ddp.encoder.no_weight_decay(), args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.base_lr)
     loss_scaler = NativeScaler()
     print('Base lr: ', args.base_lr)

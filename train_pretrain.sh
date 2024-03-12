@@ -1,30 +1,24 @@
 # ------------------- Args setting -------------------
 MODEL=$1
-BATCH_SIZE=$2
-DATASET=$3
-DATASET_ROOT=$4
-WORLD_SIZE=$5
-RESUME=$6
+MODEL_T=$2
+BATCH_SIZE=$3
+DATASET=$4
+DATASET_ROOT=$5
+WORLD_SIZE=$6
+RESUME=$7
 
 # ------------------- Training setting -------------------
-if [[ $MODEL == *"mae_vit"* ]]; then
-    COLOR_FORMAT="rgb"
-    MASK_RATIO=0.75
-    # Optimizer config
-    OPTIMIZER="adamw"
-    LRSCHEDULER="cosine"
-    BASE_LR=0.00015
-    MIN_LR=0
-    WEIGHT_DECAY=0.05
-    # Epoch
-    MAX_EPOCH=800
-    WP_EPOCH=40
-    EVAL_EPOCH=20
-else
-    echo "Unknown model!!"
-    exit 1
-fi
-
+MASK_RATIO=0.75
+# Optimizer config
+OPTIMIZER="adamw"
+LRSCHEDULER="cosine"
+BASE_LR=0.00015
+MIN_LR=0
+WEIGHT_DECAY=0.05
+# Epoch
+MAX_EPOCH=800
+WP_EPOCH=40
+EVAL_EPOCH=20
 
 # ------------------- Dataset setting -------------------
 if [[ $DATASET == "cifar10" ]]; then
@@ -55,8 +49,8 @@ if [ $WORLD_SIZE == 1 ]; then
             --cuda \
             --root ${DATASET_ROOT} \
             --dataset ${DATASET} \
-            --color_format ${COLOR_FORMAT} \
             --model ${MODEL} \
+            --teacher $
             --resume ${RESUME} \
             --batch_size ${BATCH_SIZE} \
             --img_size ${IMG_SIZE} \
@@ -76,7 +70,6 @@ elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
             -dist \
             --root ${DATASET_ROOT} \
             --dataset ${DATASET} \
-            --color_format ${COLOR_FORMAT} \
             --model ${MODEL} \
             --resume ${RESUME} \
             --batch_size ${BATCH_SIZE} \

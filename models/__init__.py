@@ -1,26 +1,45 @@
+import os
 import torch
 
-from .vit.build import build_vit, build_mae_vit
+from .vit import build_vit, build_vit_mae, ViTForImageClassification
+from .vit_sam import build_vit_sam
 
 
-def build_model(args, is_train=False):
-    # --------------------------- ViT series ---------------------------
-    if   args.model in ['vit_nano', 'vit_tiny', 'vit_base', 'vit_large', 'vit_huge']:
-        model = build_vit(args)
+def build_model(args, model_type='default'):
+    assert args.model in ['vit_t', 'vit_s', 'vit_b', 'vit_l', 'vit_h'], "Unknown vit model: {}".format(args.model)
+    if model_type == 'default':
+        return build_vit(args.model, args.img_size, args.patch_size, args.img_dim)
+    
+    elif model_type == 'cls':
+        # Build image encoder
+        image_encoder = build_vit(args.model, args.img_size, args.patch_size, args.img_dim)
 
-    elif args.model in ['mae_vit_nano', 'mae_vit_tiny', 'mae_vit_base', 'mae_vit_large', 'mae_vit_huge']:
-        model = build_mae_vit(args, is_train)
+        # Build classifier
+        model = ViTForImageClassification(image_encoder, num_classes=args.num_classes, qkv_bias=True)
 
-    if args.resume and args.resume.lower() != 'none':
-        print('loading trained weight for <{}> from <{}>: '.format(args.model, args.resume))
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        # checkpoint state dict
-        checkpoint_state_dict = checkpoint.pop("model")
-        model.load_state_dict(checkpoint_state_dict)
+        # Load MAE pretrained
+        if args.pretrained is not None:
+            # check path
+            if not os.path.exists(args.pretrained):
+                print("No pretrained model.")
+                return model
+            print('- Loading pretrained from: {}'.format(args.pretrained))
+            checkpoint = torch.load(args.pretrained, map_location='cpu')
+            # checkpoint state dict
+            encoder_state_dict = checkpoint.pop("encoder")
 
-    return model
+            # load encoder weight into ViT's encoder
+            model.encoder.load_state_dict(encoder_state_dict)
 
-
-def build_teacher(args):
-    """We use the ViT encoder of SAM as the teacher."""
-    return
+        return model
+    
+    elif model_type == 'mae':
+        return build_vit_mae(args.model, args.img_size, args.patch_size, args.img_dim, args.out_dim, args.mask_ratio, args.norm_pix_loss)
+    
+    else:
+        raise NotImplementedError("Unknown model type: {}".format(model_type))
+    
+def build_sam_teacher(args):
+    # We use the ViT of SAM as the teacher in SAMI pretraining.
+    teacher = build_vit_sam(args.teacher, args.img_size, args.patch_size, args.img_dim, args.checkpoint)
+    return teacher.eval()
