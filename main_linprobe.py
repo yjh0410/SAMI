@@ -175,7 +175,7 @@ def main():
     print('Val dataset size   : ', len(val_dataset))
 
     # ------------------------- Build Model -------------------------
-    model = build_model(args)
+    model = build_model(args, model_type='cls')
     model.classifier = torch.nn.Sequential(
         nn.BatchNorm1d(model.classifier.in_features, affine=False, eps=1e-6),
         model.classifier)
