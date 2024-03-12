@@ -1,5 +1,6 @@
 # SAMI: Masked AutoEncoders leveraging Segment-Anything
 **Unofficial pytorch implementation of Masked AutoEncoder**
+![image](./sami_overview.png)
 
 Based on my understanding of EfficientSAM's SAMI framework and the technical details given in the paper, I tried to implement the SAMI pre-training framework, using SAM's ViT to improve the performance of small-scale ViT models, including ViT-Tiny and ViT-Small.
 
