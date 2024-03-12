@@ -10,6 +10,9 @@ def build_model(args, model_type='default'):
     if model_type == 'default':
         return build_vit(args.model, args.img_size, args.patch_size, args.img_dim)
     
+    elif model_type == 'mae':
+        return build_vit_mae(args.model, args.img_size, args.patch_size, args.img_dim, args.out_dim, args.mask_ratio, args.norm_pix_loss)
+    
     elif model_type == 'cls':
         # Build image encoder
         image_encoder = build_vit(args.model, args.img_size, args.patch_size, args.img_dim)
@@ -32,9 +35,6 @@ def build_model(args, model_type='default'):
             model.encoder.load_state_dict(encoder_state_dict)
 
         return model
-    
-    elif model_type == 'mae':
-        return build_vit_mae(args.model, args.img_size, args.patch_size, args.img_dim, args.out_dim, args.mask_ratio, args.norm_pix_loss)
     
     else:
         raise NotImplementedError("Unknown model type: {}".format(model_type))

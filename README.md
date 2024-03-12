@@ -57,6 +57,7 @@ python train_finetune.py --dataset imagenet_1k --root /path/to/imagenet_1k -m vi
 
 ### Classification: ImageNet-1K
 - We use the SAM's `ViT-H` as the teacher to supervise the small-scale ViT.
+- We use the `AttentionPoolingClassifier` as the classifier.
 
 |  Method  |  Model  | Epoch | Top 1     | Weight |  MAE weight  |
 |  :---:   | :---:   | :---: | :---:     | :---:  |    :---:     |
@@ -74,4 +75,4 @@ python train_finetune.py --dataset imagenet_1k --root /path/to/imagenet_1k -m vi
 
 
 ## 6. Acknowledgment
-Thank you to **Kaiming He** for his inspiring work on [MAE](http://openaccess.thecvf.com/content/CVPR2022/papers/He_Masked_Autoencoders_Are_Scalable_Vision_Learners_CVPR_2022_paper.pdf). His research effectively elucidates the semantic distinctions between vision and language, offering valuable insights for subsequent vision-related studies. I would also like to express my gratitude for the official source code of [MAE](https://github.com/facebookresearch/mae). Additionally, I appreciate the efforts of [**IcarusWizard**](https://github.com/IcarusWizard) for reproducing the [MAE](https://github.com/IcarusWizard/MAE) implementation.
+Thanks for **Kaiming He**'s inspiring work on [MAE](http://openaccess.thecvf.com/content/CVPR2022/papers/He_Masked_Autoencoders_Are_Scalable_Vision_Learners_CVPR_2022_paper.pdf) and the official source code of [MAE](https://github.com/facebookresearch/mae).
