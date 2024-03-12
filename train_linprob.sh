@@ -1,12 +1,13 @@
-# ------------------- Model setting -------------------
-MODEL="vit_tiny"
-PRETRAINED_MODEL="weights/cifar10/mae_vit_tiny/checkpoint-0.pth"
-
+# ------------------- Args setting -------------------
+MODEL=$1
+MODEL_T=$2
+BATCH_SIZE=$3
+DATASET=$4
+DATASET_ROOT=$5
+WORLD_SIZE=$6
+RESUME=$7
 
 # ------------------- Training setting -------------------
-## Batch size
-BATCH_SIZE=256
-
 ## Epoch
 MAX_EPOCH=100
 WP_EPOCH=5
@@ -51,7 +52,7 @@ if [ $WORLD_SIZE == 1 ]; then
             --cuda \
             --root ${ROOT} \
             --dataset ${DATASET} \
-            -m ${MODEL} \
+            --model ${MODEL} \
             --batch_size ${BATCH_SIZE} \
             --img_size ${IMG_SIZE} \
             --patch_size ${PATCH_SIZE} \
@@ -61,6 +62,7 @@ if [ $WORLD_SIZE == 1 ]; then
             --base_lr ${BASE_LR} \
             --min_lr ${MIN_LR} \
             --weight_decay ${WEIGHT_DECAY} \
+            --resume ${RESUME} \
             --pretrained ${PRETRAINED_MODEL}
 elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
     python -m torch.distributed.run --nproc_per_node=${WORLD_SIZE} --master_port 1668 main_linprobe.py \
@@ -68,7 +70,7 @@ elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
             -dist \
             --root ${ROOT} \
             --dataset ${DATASET} \
-            -m ${MODEL} \
+            --model ${MODEL} \
             --batch_size ${BATCH_SIZE} \
             --img_size ${IMG_SIZE} \
             --patch_size ${PATCH_SIZE} \
@@ -78,6 +80,7 @@ elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
             --base_lr ${BASE_LR} \
             --min_lr ${MIN_LR} \
             --weight_decay ${WEIGHT_DECAY} \
+            --resume ${RESUME} \
             --pretrained ${PRETRAINED_MODEL}
 else
     echo "The WORLD_SIZE is set to a value greater than 8, indicating the use of multi-machine \
