@@ -113,7 +113,7 @@ class MaeEncoder(nn.Module):
         # unshuffle to get th binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
-        return x_masked, mask, ids_restore
+        return x_masked, mask, ids_shuffle, ids_restore
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # patch embed
@@ -125,27 +125,27 @@ class MaeEncoder(nn.Module):
         x = x + self.pos_embed
 
         # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x)
+        x, mask, ids_shuffle, ids_restore = self.random_masking(x)
 
         # apply Transformer blocks
         for block in self.blocks:
             x = block(x)
         x = self.norm_layer(x)
         
-        return x, mask, ids_restore
+        return x, mask, ids_shuffle, ids_restore
 
 class MaeDecoder(nn.Module):
     def __init__(self,
                  img_size      :int   = 16,
                  patch_size    :int   = 16,
-                 en_emb_dim    :int   = 784,
+                 emb_dim    :int   = 784,
                  out_dim       :int   = 1024,
-                 de_emb_dim    :int   = 512,
                  de_num_layers :int   = 12,
                  de_num_heads  :int   = 12,
                  qkv_bias      :bool  = True,
                  mlp_ratio     :float = 4.0,
                  dropout       :float = 0.1,
+                 mask_ratio    :float = 0.75,
                  norm_pix_loss :bool = False):
         super().__init__()
         # -------- basic parameters --------
@@ -153,19 +153,18 @@ class MaeDecoder(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = (img_size // patch_size) ** 2
-        self.en_emb_dim = en_emb_dim
-        self.de_emb_dim = de_emb_dim
+        self.emb_dim = emb_dim
         self.de_num_layers = de_num_layers
         self.de_num_heads = de_num_heads
         self.norm_pix_loss = norm_pix_loss
+        self.mask_ratio = mask_ratio
         # -------- network parameters --------
-        self.mask_token        = nn.Parameter(torch.zeros(1, 1, de_emb_dim))
-        self.decoder_embed     = nn.Linear(en_emb_dim, de_emb_dim)
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, de_emb_dim), requires_grad=False)  # fixed sin-cos embedding
-        self.decoder_norm      = nn.LayerNorm(de_emb_dim)
-        self.decoder_pred      = nn.Linear(de_emb_dim, out_dim, bias=True)
+        self.mask_token        = nn.Parameter(torch.zeros(1, 1, emb_dim))
+        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, emb_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.decoder_norm      = nn.LayerNorm(emb_dim)
+        self.decoder_pred      = nn.Linear(emb_dim, out_dim, bias=True)
         self.blocks            = nn.ModuleList([
-            ViTBlock(de_emb_dim, de_num_heads, mlp_ratio, qkv_bias, dropout=dropout)
+            ViTBlock(emb_dim, de_num_heads, mlp_ratio, qkv_bias, dropout=dropout)
             for _ in range(de_num_layers)])
         
         self._init_weights()
@@ -214,28 +213,37 @@ class MaeDecoder(nn.Module):
 
         return pos_embed.unsqueeze(0)
 
-    def forward(self, x, ids_restore):
+    def forward(self, x_enc, ids_shuffle, ids_restore):
         # embed tokens
-        x = self.decoder_embed(x)
-        B, N_nomask = x.shape[:2]
+        B, N_nomask, C = x_enc.shape
 
         # append mask tokens to sequence
-        mask_tokens = self.mask_token.repeat(B, ids_restore.shape[1] - (N_nomask - 1), 1)     # [B, N_mask, C], N_mask = (N-1) - N_nomask
-        x = torch.cat([x, mask_tokens], dim=1)
-        x = torch.gather(x, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        mask_tokens = self.mask_token.repeat(B, ids_restore.shape[1] - N_nomask, 1)     # [B, N_mask, C], N_mask = (N-1) - N_nomask
+        x_all = torch.cat([x_enc, mask_tokens], dim=1)
+        x_all = torch.gather(x_all, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, C))  # unshuffle
+        B, N, C = x_all.shape
 
         # add pos embed w/ cls token
-        x = x + self.decoder_pos_embed
+        x_all = x_all + self.decoder_pos_embed
 
         # apply Transformer blocks
         for block in self.blocks:
-            x = block(x)
-        x = self.decoder_norm(x)
+            x_all = block(x_all)
+        x_all = self.decoder_norm(x_all)
 
-        # predict pixels
-        x = self.decoder_pred(x)
+        # Masked token's feature
+        len_keep = int(N * (1 - self.mask_ratio))
+        ids_masked = ids_shuffle[:, len_keep:]
+        x_masked = torch.gather(x_all, dim=1, index=ids_masked.unsqueeze(-1).repeat(1, 1, C))
 
-        return x
+        # Concat encoder's feature and masked token's feature
+        x_out = torch.cat([x_enc, x_masked], dim=1)
+        x_out = torch.gather(x_out, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, C))  # unshuffle
+
+        # predict
+        x_out = self.decoder_pred(x_out)
+
+        return x_out
 
 
 # ------------------------ MAE Vision Transformer ------------------------
@@ -284,35 +292,24 @@ class ViTforMaskedAutoEncoder(nn.Module):
         pred: [B, N, C_ot]
         mask: [B, N], 0 is keep, 1 is remove, 
         """
-        # --------- MAE loss ---------
-        if target is None:
-            target = self.patchify(x, self.mae_encoder.patch_size)
-            if self.norm_pix_loss:
-                mean = target.mean(dim=-1, keepdim=True)
-                var = target.var(dim=-1, keepdim=True)
-                target = (target - mean) / (var + 1.e-6)**.5
-
-            pred, mask = output["x_pred"], output["mask"]
-            loss = (pred - target) ** 2
-            loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
-            loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
-
         # --------- SAMI loss ---------
-        else:
-            pred = output["x_pred"]
-            loss = (pred - target) ** 2
-            loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
-            loss = loss.mean()
-        
+        pred = output["x_pred"]
+        bs, num_patches = pred.shape[:2]
+
+        loss = (pred - target) ** 2
+        loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
+        loss = loss.sum() / (bs * num_patches)
+
         return loss
 
     def forward(self, x, target=None):
         imgs = x
-        x, mask, ids_restore = self.mae_encoder(x)
-        x = self.mae_decoder(x, ids_restore)
+        x_en, mask, ids_shuffle, ids_restore = self.mae_encoder(x)
+        x_de = self.mae_decoder(x_en, ids_shuffle, ids_restore)
+        x_en = self.mae_decoder
         output = {
-            'x_pred': x,
-            'mask': mask
+            'x_pred': x_de,
+            'mask':   mask,
         }
 
         if self.training:
@@ -384,13 +381,13 @@ def build_vit_mae(model_name="vit_t", img_size=224, patch_size=16, img_dim=3, ou
     # ---------------- MAE Decoder ----------------
     decoder = MaeDecoder(img_size=img_size,
                          patch_size=patch_size,
-                         en_emb_dim=encoder.patch_embed_dim,
+                         emb_dim=encoder.patch_embed_dim,
                          out_dim=out_dim,
-                         de_emb_dim=512,
                          de_num_layers=8,
                          de_num_heads=16,
                          qkv_bias=True,
                          mlp_ratio=4.0,
+                         mask_ratio=mask_ratio,
                          dropout=0.1,)
     
     return ViTforMaskedAutoEncoder(encoder, decoder, norm_pix_loss)

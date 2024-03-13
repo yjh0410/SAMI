@@ -42,7 +42,7 @@ def build_model(args, model_type='default'):
 def build_sam_teacher(args):
     # We use the ViT of SAM as the teacher in SAMI pretraining.
     if args.teacher is None or args.teacher.lower() == "none":
-        return None
+        raise NotImplementedError("You should build a teacher model required by the SAMI.")
     else: 
         teacher = build_vit_sam(args.teacher, args.img_size, args.patch_size, args.img_dim, args.checkpoint)
         return teacher.eval()
