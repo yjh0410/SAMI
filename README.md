@@ -10,7 +10,7 @@ First of all, you need to follow the requirements of this [README](./checkpoints
 model to supervise the small-scale ViT in the SAMI pretraining stage.
 
 ## 1. Pretrain
-We have kindly provided the bash script `train_pretrain.sh` file for pretraining. You can modify some hyperparameters in the script file according to your own needs.
+We have kindly provided the bash script `train_pretrain.sh` file for pretraining. You can modify some hyperparameters in the script file according to your own needs. Note that if you set teacher model to `None`, the model will be trained with standard MAE pipeline.
 
 - Single GPU
 
@@ -59,11 +59,14 @@ python train_finetune.py --dataset imagenet_1k --root /path/to/imagenet_1k -m vi
 ### Classification: ImageNet-1K
 - We use the SAM's `ViT-H` as the teacher to supervise the small-scale ViT.
 - We use the `AttentionPoolingClassifier` as the classifier.
+- We finetune the models with 100 epoch on ImageNet-1K.
 
-|  Method  |  Model  | Epoch | Top 1     | Weight |  MAE weight  |
-|  :---:   | :---:   | :---: | :---:     | :---:  |    :---:     |
-|   SAMI   |  ViT-T  | 100   |           |  |  |
-|   SAMI   |  ViT-S  | 100   |           |  |  |
+|  Method  |  Model  |  Teacher  |  Epoch | Top 1     | Weight |  MAE weight  |
+|  :---:   | :---:   |   :---:   |  :---: | :---:     | :---:  |    :---:     |
+|   MAE    |  ViT-T  |     -     |  100   |           |  |  |
+|   MAE    |  ViT-S  |     -     |  100   |           |  |  |
+|   SAMI   |  ViT-T  | SAM ViT-H |  100   |           |  |  |
+|   SAMI   |  ViT-S  | SAM ViT-H |  100   |           |  |  |
 
 ### Object detection: COCO
 - We use the small ViT pretrained by the SAMI as the backbone of `ViTDet`.
