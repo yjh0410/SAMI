@@ -195,8 +195,11 @@ def main():
 
      # ------------------------- Build SAM Teacher -------------------------
     teacher = build_sam_teacher(args)
-    teacher.to(device)
-    args.out_dim = teacher.embed_dim
+    if teacher is not None:
+        teacher.to(device)
+        args.out_dim = teacher.embed_dim
+    else:
+        args.out_dim = args.patch_size ** 2 *args.img_dim
 
 
    # ------------------------- Build Model -------------------------

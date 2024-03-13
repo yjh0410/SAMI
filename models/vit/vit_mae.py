@@ -249,19 +249,65 @@ class ViTforMaskedAutoEncoder(nn.Module):
         self.mae_decoder = decoder
         self.norm_pix_loss = norm_pix_loss
 
-    def compute_loss(self, output, target):
+    def patchify(self, imgs, patch_size):
+        """
+        imgs: (B, 3, H, W)
+        x: (N, L, patch_size**2 *3)
+        """
+        p = patch_size
+        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+
+        h = w = imgs.shape[2] // p
+        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+        x = torch.einsum('nchpwq->nhwpqc', x)
+        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+
+        return x
+
+    def unpatchify(self, x, patch_size):
+        """
+        x: (B, N, patch_size**2 *3)
+        imgs: (B, 3, H, W)
+        """
+        p = patch_size
+        h = w = int(x.shape[1]**.5)
+        assert h * w == x.shape[1]
+        
+        x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
+        x = torch.einsum('nhwpqc->nchpwq', x)
+        imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
+
+        return imgs
+
+    def compute_loss(self, x, output, target):
         """
         pred: [B, N, C_ot]
         mask: [B, N], 0 is keep, 1 is remove, 
         """
-        pred = output["x_pred"]
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
-        loss = loss.mean()
+        # --------- MAE loss ---------
+        if target is None:
+            target = self.patchify(x, self.mae_encoder.patch_size)
+            if self.norm_pix_loss:
+                mean = target.mean(dim=-1, keepdim=True)
+                var = target.var(dim=-1, keepdim=True)
+                target = (target - mean) / (var + 1.e-6)**.5
+
+            pred, mask = output["x_pred"], output["mask"]
+            loss = (pred - target) ** 2
+            loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
+            loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+
+        # --------- SAMI loss ---------
+        else:
+            pred = output["x_pred"]
+            loss = (pred - target) ** 2
+            loss = loss.mean(dim=-1)  # [B, N], mean loss per patch
+            loss = loss.mean()
         
         return loss
 
     def forward(self, x, target=None):
+        imgs = x
         x, mask, ids_restore = self.mae_encoder(x)
         x = self.mae_decoder(x, ids_restore)
         output = {
@@ -270,8 +316,7 @@ class ViTforMaskedAutoEncoder(nn.Module):
         }
 
         if self.training:
-            assert target is not None
-            loss = self.compute_loss(output, target)
+            loss = self.compute_loss(imgs, output, target)
             output["loss"] = loss
 
         return output

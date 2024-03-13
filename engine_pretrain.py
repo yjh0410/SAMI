@@ -36,7 +36,7 @@ def train_one_epoch(args,
 
         # To device
         images = images.to(device, non_blocking=True)
-        targets = teacher(images)
+        targets = teacher(images) if teacher is not None else None
 
         # Inference
         with torch.cuda.amp.autocast():
