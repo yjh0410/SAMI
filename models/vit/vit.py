@@ -49,7 +49,7 @@ class ImageEncoderViT(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
         # ----------- Model parameters -----------
         self.patch_embed = PatchEmbed(in_chans, patch_embed_dim, patch_size, stride=patch_size)
-        self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim), requires_grad=False)
+        self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim))
         self.norm_layer  = nn.LayerNorm(patch_embed_dim)
         self.blocks      = nn.ModuleList([
             ViTBlock(patch_embed_dim, num_heads, mlp_ratio, True, act_layer=act_layer, dropout=dropout)
