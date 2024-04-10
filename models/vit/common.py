@@ -37,7 +37,7 @@ class MLPBlock(nn.Module):
         return x
 
 
-# ----------------------- Model modules -----------------------
+# ----------------------- Vision Transformer modules -----------------------
 class ViTBlock(nn.Module):
     def __init__(self,
                  dim         : int,
@@ -97,7 +97,6 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(dropout)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(dropout)
-
 
     def forward(self, x):
         bs, N, _ = x.shape
@@ -191,6 +190,90 @@ class AttentionPoolingClassifier(nn.Module):
         out = self.linear(x_cls)
 
         return out, x_cls
+
+
+# ----------------------- Cross attention modules -----------------------
+class CABlock(nn.Module):
+    def __init__(self,
+                 dim         : int,
+                 num_heads   : int,
+                 mlp_ratio   : float = 4.0,
+                 qkv_bias    : bool = True,
+                 act_layer   : Type[nn.Module] = nn.GELU,
+                 dropout     :float = 0.
+                 ) -> None:
+        super().__init__()
+        # -------------- Model parameters --------------
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn  = CrossAttention(dim         = dim,
+                                    qkv_bias    = qkv_bias,
+                                   num_heads   = num_heads,
+                                   dropout     = dropout
+                                   )
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp   = MLPBlock(embedding_dim=dim, mlp_dim=int(dim * mlp_ratio), act=act_layer)
+
+    def forward(self,
+                q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                ) -> torch.Tensor:
+        shortcut = q
+        q = self.norm1(q)
+        q = self.attn(q, k, v)
+        q = shortcut + q
+
+        out = q + self.mlp(self.norm2(q))
+
+        return out
+
+class CrossAttention(nn.Module):
+    def __init__(self,
+                 dim       :int,
+                 qkv_bias  :bool  = False,
+                 num_heads :int   = 8,
+                 dropout   :float = 0.):
+        super().__init__()
+        # --------------- Basic parameters ---------------
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        # --------------- Network parameters ---------------
+        self.q_proj = nn.Linear(dim, dim, bias = qkv_bias)
+        self.k_proj = nn.Linear(dim, dim, bias = qkv_bias)
+        self.v_proj = nn.Linear(dim, dim, bias = qkv_bias)
+        self.attn_drop = nn.Dropout(dropout)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(dropout)
+
+    def forward(self, q, k, v):
+        bs, Nq, _ = q.shape
+        _,  Nk, _ = k.shape
+        _,  Nv, _ = v.shape
+        # ----------------- Input proj -----------------
+        q = self.q_proj(q)
+        k = self.k_proj(k)
+        v = self.v_proj(v)
+
+        # ----------------- Multi-head Attn -----------------
+        ## [B, N, C] -> [B, N, H, C_h] -> [B, H, N, C_h]
+        q = q.view(bs, Nq, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
+        k = k.view(bs, Nk, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
+        v = v.view(bs, Nv, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
+        ## [B, H, Nq, C_h] X [B, H, C_h, Nk] = [B, H, Nq, Nk]
+        attn = q * self.scale @ k.transpose(-1, -2)
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = attn @ v # [B, H, Nq, C_h]
+
+        # ----------------- Output -----------------
+        x = x.permute(0, 2, 1, 3).contiguous().view(bs, Nq, -1)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        return x
 
 
 # ---------------------- Model functions ----------------------
